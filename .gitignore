@@ -1,1 +1,6 @@
 test/*
+__pycache__
+
+# App secrets, access to my dropbox...
+dbauth.py
+access_token
