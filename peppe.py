@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 
-import os
+import os, sys
 import signal
 import time
+import re
+import atexit
 
 import dropbox
 import dbauth
 
 def dropbox_authorise():
 	"Authorise the application to use a specific user's Dropbox"
-
 	flow = dropbox.client.DropboxOAuth2FlowNoRedirect(dbauth.DB_APP_KEY, dbauth.DB_APP_SECRET)
-
 	authorize_url = flow.start()
 
 	print("As this is your first run, you'll need to grant Peppe access to your Dropbox")
 	print('1. Go to: ' + authorize_url)
 	print('2. Click "Allow" (you might have to log in first)')
-	print('3. Copy the authorization code.')
-	auth_code = input("Enter the authorization code here: ").strip()
+	auth_code = input("3. Enter the authorization code here: ").strip()
 	
 	access_token, user_id = flow.finish(auth_code)
 
@@ -30,10 +29,9 @@ def dropbox_authorise():
 
 def start_gphoto(interval, project_name):
 	id = os.fork()
-	args = ["gphoto2", "--capture-image-and-download", "-I %d" % interval]
 
 	if id == 0:
-		os.chdir('photos')
+		args = ["gphoto2", "--capture-image-and-download", "-I %d" % interval]
 		os.execv('/usr/bin/gphoto2', args)
 	
 	return id
@@ -45,9 +43,10 @@ def stop_gphoto(pid):
 if __name__ == "__main__":
 	print("~ Peppe, the Raspberry Pi time-lapse photographer ~")	
 
-	## Connect to Dropbox ##
-	access_token = ""
+	# ~ Connect to Dropbox  ~ #
+	# ----------------------- #
 	
+	# Fetch access token from disk, or the user
 	if os.path.isfile(os.path.relpath('access_token')):
 		auth_file = open('access_token', 'r')
 		access_token = auth_file.read().strip()
@@ -55,35 +54,68 @@ if __name__ == "__main__":
 	else:
 		access_token = dropbox_authorise()
 
-	client = dropbox.client.DropboxClient(access_token)
+	# Try connecting
+	ready = False
+	while not ready:
+		client = dropbox.client.DropboxClient(access_token)
+		try:
+			client.account_info()
+			ready = True
+		except dropbox.rest.ErrorResponse as e:
+			print("Failed to connect to dropbox. Trying again...")
 
-	print("Connected to Dropbox successfully!")
-	print("")
 
-	## Create a new photography project ##
+	# ~ Create a new photography project ~ #
+	# ------------------------------------ #
+
 	project_name = input("What would you like to name this photography project? ").strip()
 
 	if os.path.exists(os.path.relpath("photos/" + project_name)):
 		print("A project with that name already exists.")
-		return
+		sys.exit(0)
+		# TODO: Handle existing projects
 
-	os.makedirs('photos' + project_name)
+	os.makedirs('photos/' + project_name)
 
-	## Start taking photos ##
-	interval = 10 # seconds
+	# Do everything from the project directory
+	os.chdir('photos/' + project_name)
+
+	# Obtain the time to wait between photos
+	ready = False
+	while not ready:
+		interval = input("How often would you like to take photos? (seconds) ").strip()
+		try:
+			interval = int(interval)
+			ready = True
+		except ValueError as e:
+			print("ERROR: Please input a whole number of seconds")
+
+
+	# ~ Start taking photos ~ #
+	# ----------------------- #
 
 	gphoto_pid = start_gphoto(interval, project_name)
+	atexit.register(stop_gphoto, gphoto_pid)
 
-	# Sleep half an interval, then start watching for files
-	time.sleep(interval//2)
+	# Keep track of the number of photos taken
 	counter = 0
+	
+	# Don't take photos when it's dark...
+	daytime = True
 
-	# Files todo:
-	# More sensible naming; img00001.jpg. Allow multiple gphoto starts 
-	# Upload to Dropbox
-	# 
+	# Sleep a quarter of an interval, then start watching for files
+	time.sleep(interval//4)
+	# TODO: This could be better...
 
-	# General todo: Quit gphoto at night!
+	# Compile a regex to match files from gphoto
+	regex = re.compile("capt") 
 
-	while (true):
-		
+	while daytime:
+		for file in os.listdir():
+			if regex.search(file):
+				os.rename(file, "img%05d.jpg" % (counter, ))
+				counter += 1
+				# TODO: Upload to Dropbox (need a better cycle system)
+
+		# Run a quarter of a period out of sync with the camera
+		time.sleep(interval)

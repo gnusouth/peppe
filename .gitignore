@@ -1,6 +1,9 @@
-test/*
-__pycache__
-
-# App secrets, access to my dropbox...
+# Ignore app secrets, access to my dropbox...
 dbauth.py
 access_token
+
+# Ignore actual photos
+photos/*
+
+# Ignore bytecode
+__pycache__
