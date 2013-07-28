@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os, sys
+import subprocess
 import signal
 import time
 import re
@@ -8,6 +9,7 @@ import atexit
 
 import dropbox
 import dbauth
+from daylight import sunrise, sunset
 
 def dropbox_authorise():
 	"Authorise the application to use a specific user's Dropbox"
@@ -21,24 +23,17 @@ def dropbox_authorise():
 	
 	access_token, user_id = flow.finish(auth_code)
 
-	auth_file = open('db_auth', 'w')
-	auth_file.write(access_token)
-	auth_file.close()
+	with open('access_token', 'w') as auth_file:
+		auth_file.write(access_token)
 
 	return access_token
 
-def start_gphoto(interval, project_name):
-	id = os.fork()
-
-	if id == 0:
-		args = ["gphoto2", "--capture-image-and-download", "-I %d" % interval]
-		os.execv('/usr/bin/gphoto2', args)
-	
-	return id
-
-def stop_gphoto(pid):
-	print("Killing gphoto2 @ %d" % (pid, ))
-	os.kill(pid, signal.SIGTERM)
+def current_time():
+	"24 hour time represented as 4 digits, eg. 0800 for 8am"
+	now = time.localtime() # Make sure your clock is right
+	the_time = (now.tm_hour*100) + now.tm_min
+	this_month = time.strftime("%b", now).lower()
+	return (the_time, this_month)
 
 if __name__ == "__main__":
 	print("~ Peppe, the Raspberry Pi time-lapse photographer ~")	
@@ -48,9 +43,8 @@ if __name__ == "__main__":
 	
 	# Fetch access token from disk, or the user
 	if os.path.isfile(os.path.relpath('access_token')):
-		auth_file = open('access_token', 'r')
-		access_token = auth_file.read().strip()
-		auth_file.close()
+		with open('access_token', 'r') as auth_file:
+			access_token = auth_file.read().strip()
 	else:
 		access_token = dropbox_authorise()
 
@@ -94,28 +88,64 @@ if __name__ == "__main__":
 	# ~ Start taking photos ~ #
 	# ----------------------- #
 
-	gphoto_pid = start_gphoto(interval, project_name)
-	atexit.register(stop_gphoto, gphoto_pid)
-
 	# Keep track of the number of photos taken
 	counter = 0
-	
-	# Don't take photos when it's dark...
-	daytime = True
 
-	# Sleep a quarter of an interval, then start watching for files
-	time.sleep(interval//4)
-	# TODO: This could be better...
+	# Keep track of whether gphoto is running
+	running = False
 
 	# Compile a regex to match files from gphoto
 	regex = re.compile("capt") 
 
-	while daytime:
-		for file in os.listdir():
-			if regex.search(file):
-				os.rename(file, "img%05d.jpg" % (counter, ))
-				counter += 1
-				# TODO: Upload to Dropbox (need a better cycle system)
+	# Commandline arguments to gphoto
+	args = ["gphoto2", "--capture-image-and-download", "-I", str(interval)]
 
-		# Run a quarter of a period out of sync with the camera
+	# Run forever, but only take photos during the day
+	while True:
+		the_time, this_month = current_time()
+
+		while (the_time >= sunrise[this_month]) and (the_time <= sunset[this_month]):
+			
+			# Start gphoto if it isn't running
+			if not running:
+				print("Started a fresh gphoto.")
+				gphoto = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+				running = True
+				atexit.register(gphoto.terminate)
+
+				# Wait a quarter of a cycle
+				time.sleep(interval//4)
+		
+			# Check for new photos
+			for file in sorted(os.listdir()):
+				if regex.search(file):
+					# Rename
+					new_name = "img%05d.jpg" % (counter, )
+					os.rename(file, new_name)
+					counter += 1
+
+					# Upload to Dropbox
+					print("Uploading " + new_name, end="")
+					dbpath = '/Photos/' + project_name + "/" + new_name
+					with open(new_name, 'rb') as f:
+						response = client.put_file(dbpath, f)
+
+					print(" [done]")
+			# Check gphoto status
+			if gphoto.poll():
+				running = False
+
+			# Wait for new photos
+			time.sleep(interval)
+
+			# Update time
+			the_time, this_month = current_time()
+
+		# Quit gphoto at night
+		if running:
+			gphoto.terminate()
+			running = False
+
+		# Wait out the night
+		print("Sleeping, night")
 		time.sleep(interval)

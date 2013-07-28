@@ -8,7 +8,7 @@ Peppe is a time-lapse photographer for the Raspberry Pi (or indeed any computer)
 * Make sure you have python version 3 or greater installed, and a corresponding version of `pip`
 
 * Install the python interface to dropbox. On Ubuntu 13.04:  
-	sudo pip3 install dropbox
+    `sudo pip3 install dropbox`
 
 * Install `gphoto2` (available in repositories)
 
