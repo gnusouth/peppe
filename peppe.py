@@ -8,8 +8,9 @@ import atexit
 
 from daylight import sunrise, sunset
 
-# Perform one-off compilation of the regex to match files from gphoto
+# Perform one-off compilation of the regular expressions
 GP_REGEX = re.compile("capt")
+PHOTO_REGEX = re.compile("img")
 
 def dropbox_authorise():
 	"""Authorise the application to use a specific user's Dropbox"""
@@ -34,7 +35,7 @@ def dropbox_connect():
 	Return None if the user doesn't want Dropbox.
 	"""
 
-	question = "Would you like to upload photos to dropbox [y/N]? "
+	question = "Upload to Dropbox [y/N]: "
 	use_dropbox = input(question).strip().lower()
 
 	if use_dropbox in ["n", "no", ""]:
@@ -73,10 +74,10 @@ def dropbox_upload(file_name, project_name, db_client):
 	# TODO: Error handling??
 
 def current_time():
-	"""Return the current time and month as a duple.
+	"""Return the hours and minutes since midnight and the current month.
 
-	24 hour time represented as 3 or 4 digits, eg. 2005 for 8:05pm
-	The abbreviated month name, eg. 'jun' for June
+	Time: Combined hours and minutes, eg. 2005 for 8:05pm
+	Month name: abbreviated, eg. 'jun' for June
 	"""
 	now = time.localtime() # Make sure your clock is right
 	the_time = (now.tm_hour*100) + now.tm_min
@@ -84,27 +85,87 @@ def current_time():
 	return (the_time, this_month)
 
 def create_project():
-	"""Create a new photography project and return its name and path."""
+	"""Create a new photography project and return its information.
+
+	Return:
+	1) The project's name.
+	2) The (absolute) path to store photos in.
+	3) The number to begin new photo labels at (normally 0).
+	"""
 	
-	question = "What would you like to name this photography project? "
-	project_name = input(question).strip()
+	project_name = input("Project name: ").strip()
 
-	# TODO: Implement this, handle existing projects
-	question = "Where would you like to store the photos? (full path) "
+	default_path = "photos/%s" % (project_name, )
+	question = "Project path [%s]: " % (default_path, )
+	project_path = input(question).strip()
 
-	# Default
-	project_path = "photos/" + project_name
+	default_path = os.path.abspath(default_path) # avoid printing abspath
 
-	if os.path.exists(os.path.relpath(project_path)):
-		print("A project with that name already exists.")
-		sys.exit(0)
+	if project_path == "":
+		project_path = default_path
 	else:
-		os.makedirs(project_path)
-	
-	return (project_name, project_path)
+		project_path = os.path.expanduser(project_path)
+
+	# Raw files from gphoto get stored in a sub-directory
+	raw_photo_dir = os.path.join(project_path, "raw/")
+
+	# In most cases, start the numbering from zero
+	n_start = 0
+
+	if os.path.exists(project_path):
+		contents = os.listdir(project_path)
+
+		# Early return for empty folders
+		if len(contents) == 0:
+			os.makedirs(raw_photo_dir)
+			return (project_name, project_path, n_start)
+
+		question = "Folder not empty. Continue project [Y/n]? "
+		answer = input(question).strip().lower()
+
+		if answer in ["n", "no"]:
+			print("Goodbye!")
+			sys.exit(0)
+
+
+		# Check that the files in the project dir are photos
+		for file in contents:
+			filepath = os.path.join(project_path, file)
+			
+			if os.path.isfile(filepath):
+				if not PHOTO_REGEX.search(file):
+					print("Invalid project directory.")
+					sys.exit(1)
+			else:
+				# Filter out directories
+				contents.remove(file)
+
+		# Get the numbering of the last photo taken
+		if len(contents) > 0:
+			contents = sorted(contents)
+			last_photo = contents[len(contents) - 1]
+			n_start = re.search(r"[0-9]{5}", last_photo).group()
+			n_start = int(n_start)
+			n_start += 1 # begin new numbering one higher
+
+		# Deal with the raw directory
+		if os.path.isdir(raw_photo_dir):
+			for file in sorted(os.listdir(raw_photo_dir)):
+				new_file = "img%05d.jpg" % (n_start, )
+				new_file = os.path.join(project_path, new_file)
+				old_file = os.path.join(raw_photo_dir, file)
+				os.rename(old_file, new_file)
+				n_start += 1
+		else:
+			os.makedirs(raw_photo_dir)
+	else:
+		# Make the project directory, and raw
+		os.makedirs(raw_photo_dir)
+
+	return (project_name, project_path, n_start)
 
 def poll_night_mode():
-	question = "Would you like to take photos all through the night [y/N]? "
+	question = "Night mode [y/N]: "
 	answer = input(question).strip().lower()
 
 	if answer in ["y", "ye", "yes"]:
@@ -115,7 +176,7 @@ def poll_night_mode():
 def get_interval():
 	"""Fetch and return the time interval to wait between taking photos."""
 	
-	question = "How often would you like to take photos (seconds)?"
+	question = "Time period (seconds): "
 
 	while True:
 		interval = input(question).strip()
@@ -144,44 +205,50 @@ def take_photos(interval, project_name, counter, db_client, night_mode):
 	gp_start_t = 0
 	gp_runs = 0 # the number of photos taken by this gphoto process
 
+	# Wait 3 seconds after each photo is taken before checking for files
+	offset = 3
+
 	while (the_time >= sunrise[this_month] and
 	       the_time <= sunset[this_month]) or night_mode:
 
 		# Start gphoto if it isn't running
 		if not running:
-			print("Started a fresh gphoto.")
 			gphoto = subprocess.Popen(gp_args,
 						  stdin=subprocess.DEVNULL,
 						  stdout=subprocess.DEVNULL)
 			running = True
 			gp_start_t = int(time.time())
-			gp_runs = 0
+			gp_runs = 1
 			atexit.register(gphoto.terminate)
+			print("Started a fresh gphoto.")
+			time.sleep(offset)
 		
 		# Check for new photos
 		for file in sorted(os.listdir()):
-			if GP_REGEX.search(file):
-				# Rename the files (for flexibility)
-				r_file = "img%05d.jpg" % (counter, )
-				os.rename(file, r_file)
-				counter += 1
+			# Move files to the parent directory (we are in raw)
+			new_file = "../img%05d.jpg" % (counter, )
+			os.rename(file, new_file)
+			counter += 1
 
-				# Upload to Dropbox if desired
-				if db_client:
-					dropbox_upload(r_file, project_name,
-							       db_client)
+			# Upload to Dropbox if desired
+			if db_client:
+				dropbox_upload(new_file, project_name,
+							 db_client)
 		
 		# Check that gphoto hasn't died
 		if gphoto.poll():
 			atexit.unregister(gphoto.terminate)
 			running = False
 
-		# Wait for gphoto's next photo period
-		while int(time.time()) < (gp_start_t + gp_runs*interval):
+		# Wait for gphoto to take a new photo
+		wait_until = gp_start_t + gp_runs*interval + offset
+		
+		while int(time.time()) < wait_until:
 			time.sleep(interval//4)
 
-		# Update time
+		# Update for the next round
 		the_time, this_month = current_time()
+		gp_runs += 1
 	
 	# Quit gphoto at night
 	if running:
@@ -193,7 +260,7 @@ def take_photos(interval, project_name, counter, db_client, night_mode):
 def main():
 	print("~ Peppe, the Raspberry Pi time-lapse photographer ~")	
 
-	project_name, project_path = create_project()
+	project_name, project_path, counter = create_project()
 
 	interval = get_interval()
 
@@ -201,11 +268,8 @@ def main():
 	
 	db_client = dropbox_connect()	
 
-	# Perform the actual photo-taking in the project directory
-	os.chdir(project_path)
-
-	# Keep track of the number of photos taken
-	counter = 0
+	# Perform the actual photo-taking in the project's "raw" directory
+	os.chdir(os.path.join(project_path, "raw/"))
 
 	# Run forever, but only take photos during the day
 	while True:
